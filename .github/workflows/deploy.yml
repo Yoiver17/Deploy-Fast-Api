@@ -6,8 +6,79 @@ on:
       - master
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
+    name: "🧪 Pruebas Unitarias"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build test image
+        run: |
+          echo "🏗️ Construyendo imagen para pruebas..."
+          docker build -t fastapi-test .
+          echo "✅ Imagen de pruebas construida exitosamente"
+
+      - name: Run unit tests in Docker
+        run: |
+          echo "🧪 Ejecutando pruebas unitarias en Docker..."
+          
+          # Ejecutar pytest y capturar el código de salida
+          if docker run --rm -v "$(pwd):/app" -w /app --user root fastapi-test \
+            sh -c "
+              pip install pytest pytest-cov pytest-asyncio httpx &&
+              mkdir -p /app/htmlcov &&
+              chmod 777 /app/htmlcov &&
+              export COVERAGE_FILE=/app/.coverage &&
+              pytest tests/ -v --tb=short --color=yes --cov=app --cov-report=term-missing --cov-report=html:/app/htmlcov --cov-report=xml:/app/coverage.xml
+            "; then
+            # Solo ejecutar permisos y mensajes de éxito si pytest pasó
+            docker run --rm -v "$(pwd):/app" -w /app --user root fastapi-test \
+              sh -c "
+                chmod 666 /app/.coverage /app/coverage.xml 2>/dev/null || true &&
+                chmod -R 666 /app/htmlcov/* 2>/dev/null || true
+              "
+            echo "✅ Todas las pruebas unitarias pasaron exitosamente"
+            echo "📊 Resumen de cobertura generado en htmlcov/"
+          else
+            echo "❌ Las pruebas unitarias fallaron"
+            echo "🔍 Revisando logs de pruebas..."
+            # Intentar obtener los permisos de los archivos generados aunque hayan fallado las pruebas
+            docker run --rm -v "$(pwd):/app" -w /app --user root fastapi-test \
+              sh -c "
+                chmod 666 /app/.coverage /app/coverage.xml 2>/dev/null || true &&
+                chmod -R 666 /app/htmlcov/* 2>/dev/null || true
+              " || true
+            exit 1
+          fi
+
+      - name: Test Summary
+        run: |
+          echo "📋 RESUMEN DE PRUEBAS:"
+          echo "  📁 Directorio: tests/"
+          echo "  🧪 Framework: pytest"
+          echo "  📊 Cobertura: habilitada"
+          echo "  ✅ Estado: EXITOSO"
+          
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: |
+            .coverage
+            htmlcov/
+            coverage.xml
+          retention-days: 30
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    name: "🏗️ Build & Test Docker"
 
     steps:
       - name: Checkout repository
@@ -22,13 +93,19 @@ jobs:
           docker compose up -d --build
           
           # Esperar a que los servicios estén listos
-          sleep 10
+          echo "⏳ Esperando a que los servicios estén listos..."
+          sleep 30
+          
+          # Verificar que los contenedores estén funcionando
+          docker compose ps
           
           # Testear que el servicio FastAPI está funcionando a través del proxy nginx
-          curl --fail http://localhost:8081/docs
+          echo "🔍 Probando endpoint de documentación..."
+          curl --fail --silent --max-time 10 http://localhost:8080/docs
           
           # Verificar que el endpoint de health/info funciona
-          curl --fail http://localhost:8081/
+          echo "🔍 Probando endpoint principal..."
+          curl --fail --silent --max-time 10 http://localhost:8080/
           
           # Verificar logs para asegurar que no hay errores
           docker compose logs api
@@ -40,6 +117,7 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    name: "🚀 Deploy a Producción"
 
     steps:
       - name: Checkout repository
@@ -74,8 +152,8 @@ jobs:
             docker compose ps
             
             # Test simple de conectividad
-            if curl --fail --silent --max-time 5 http://localhost:8081/ > /dev/null; then
-              echo "✅ Aplicación funcionando correctamente en puerto 80"
+            if curl --fail --silent --max-time 10 http://localhost:8080/ > /dev/null; then
+              echo "✅ Aplicación funcionando correctamente en puerto 8080"
             else
               echo "❌ Error: La aplicación no responde"
               echo "📋 Logs para debugging:"
